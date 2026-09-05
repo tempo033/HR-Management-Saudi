@@ -8,18 +8,20 @@ type Row = { id:string; type:string; employeeId:string; employeeName:string; sta
 const read = (key:string, fallback:any) => { try { const v=localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
 const write = (key:string, value:any) => localStorage.setItem(key, JSON.stringify(value));
 const esc = (v:any) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c));
+const valueOf = (data:any, keys:string[]) => keys.map(k=>data?.[k]).find(v=>v!==undefined&&v!==null&&String(v).trim()!=='') ?? '';
 const makeId = () => `FORM-${new Date().toISOString().replace(/\D/g,'').slice(0,14)}-${Math.floor(1000+Math.random()*9000)}`;
-const fmt = (v:string) => v ? new Date(v).toLocaleString('ar-SA') : '—';
+const fmt = (v:string) => { if(!v) return '—'; const d=new Date(v); return Number.isNaN(d.getTime())?'—':d.toLocaleString('ar-SA'); };
 
 function migrate():Row[] {
-  const current = read(KEY, []);
+  const current = read(KEY, null);
   if (Array.isArray(current)) return current;
   const legacy = read(LEGACY_KEY, {});
   const rows:Row[] = [];
   for (const type of TYPES) {
     const data = legacy?.[type];
     if (!data) continue;
-    rows.push({ id:makeId(), type, employeeId:data.employeeId||'', employeeName:data.name||'', status:data.status||'مسودة', createdAt:data.updatedAt||new Date().toISOString(), updatedAt:data.updatedAt||new Date().toISOString(), data });
+    const now=data.updatedAt||new Date().toISOString();
+    rows.push({ id:makeId(), type, employeeId:valueOf(data,['employeeId','id']), employeeName:valueOf(data,['employeeName','name','employee']), status:valueOf(data,['status'])||'مسودة', createdAt:now, updatedAt:now, data });
   }
   write(KEY, rows);
   return rows;
@@ -34,13 +36,14 @@ function sync():Row[] {
     if (!data) continue;
     const existing = rows.find(r => r.type === type);
     if (!existing) {
-      rows.push({id:makeId(), type, employeeId:data.employeeId||'', employeeName:data.name||'', status:data.status||'مسودة', createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), data});
+      const now=new Date().toISOString();
+      rows.push({id:makeId(), type, employeeId:valueOf(data,['employeeId','id']), employeeName:valueOf(data,['employeeName','name','employee']), status:valueOf(data,['status'])||'مسودة', createdAt:now, updatedAt:now, data});
       changed = true;
     } else if (JSON.stringify(existing.data) !== JSON.stringify(data)) {
       existing.data = data;
-      existing.employeeId = data.employeeId || '';
-      existing.employeeName = data.name || '';
-      existing.status = data.status || 'مسودة';
+      existing.employeeId = valueOf(data,['employeeId','id']);
+      existing.employeeName = valueOf(data,['employeeName','name','employee']);
+      existing.status = valueOf(data,['status']) || 'مسودة';
       existing.updatedAt = new Date().toISOString();
       changed = true;
     }
@@ -74,8 +77,10 @@ function printOne(r:Row) {
 }
 
 function removeRow(id:string) {
-  const rows=sync().filter(r=>r.id!==id); write(KEY,rows);
-  const legacy=read(LEGACY_KEY,{}); const target=sync().find(r=>r.id===id); if(target) { delete legacy[target.type]; write(LEGACY_KEY,legacy); }
+  const current=sync();
+  const target=current.find(r=>r.id===id);
+  write(KEY,current.filter(r=>r.id!==id));
+  if(target){ const legacy=read(LEGACY_KEY,{}); delete legacy[target.type]; write(LEGACY_KEY,legacy); }
   window.location.reload();
 }
 
@@ -102,27 +107,35 @@ function jsonBackup() {
   download(`HR-Forms-${new Date().toISOString().slice(0,10)}.json`,new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}));
 }
 
+let rendering=false;
 function render() {
+  if(rendering) return;
   const heading=[...document.querySelectorAll('h1')].find(h=>h.textContent?.includes('النماذج الإلكترونية'));
   const grid=document.querySelector('.report-grid');
   if(!heading||!grid) return;
   const section=grid.parentElement; if(!section) return;
   let bar=section.querySelector('[data-forms-manager]') as HTMLElement|null;
   if(!bar){
+    rendering=true;
     bar=document.createElement('div'); bar.setAttribute('data-forms-manager','1'); bar.className='hr-module-toolbar';
     bar.innerHTML='<div class="hr-module-toolbar-title">إدارة النماذج</div><button data-saved>النماذج المحفوظة</button><button data-export>تصدير Excel</button><button data-json>نسخة JSON</button>';
     section.insertBefore(bar,grid);
     (bar.querySelector('[data-saved]') as HTMLElement).onclick=openSaved;
     (bar.querySelector('[data-export]') as HTMLElement).onclick=exportAll;
     (bar.querySelector('[data-json]') as HTMLElement).onclick=jsonBackup;
+    rendering=false;
   }
   let summary=section.querySelector('[data-forms-summary]') as HTMLElement|null;
   const rows=sync();
   const byType=new Map(rows.map(r=>[r.type,r]));
   const html=TYPES.map(type=>{const r=byType.get(type); return `<div class="report" style="min-height:auto"><b>${esc(type)}</b><span>${r?`محفوظ • ${esc(fmt(r.updatedAt))}`:'غير محفوظ بعد'}</span>${r?`<button data-summary-open="${esc(type)}">فتح المحفوظ</button>`:''}</div>`}).join('');
-  if(!summary){summary=document.createElement('div'); summary.setAttribute('data-forms-summary','1'); section.appendChild(summary);}
-  summary.className='report-grid'; summary.innerHTML=html;
-  summary.querySelectorAll('[data-summary-open]').forEach(b=>(b as HTMLElement).onclick=()=>openEditor((b as HTMLElement).dataset.summaryOpen||''));
+  if(!summary){rendering=true; summary=document.createElement('div'); summary.setAttribute('data-forms-summary','1'); section.appendChild(summary); rendering=false;}
+  if(summary.innerHTML!==html){
+    rendering=true;
+    summary.className='report-grid'; summary.innerHTML=html;
+    summary.querySelectorAll('[data-summary-open]').forEach(b=>(b as HTMLElement).onclick=()=>openEditor((b as HTMLElement).dataset.summaryOpen||''));
+    rendering=false;
+  }
 }
 
 const patchedKey='__hr_forms_storage_patched__';
